@@ -2,6 +2,8 @@ import os
 import time
 import requests
 import sys
+import json
+import random
 from datetime import datetime
 import pytz
 from colorama import Fore, Style, init
@@ -11,23 +13,43 @@ warnings.filterwarnings('ignore')
 
 init(autoreset=True)
 
+UA_LIBRARY = {
+    "computer": [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edg/122.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0"
+    ],
+    "mac": [
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15"
+    ],
+    "android": [
+        "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.64 Mobile Safari/537.36",
+        "Mozilla/5.0 (Linux; Android 13; SM-A536B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.6167.144 Mobile Safari/537.36"
+    ],
+    "ios": [
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+        "Mozilla/5.0 (iPad; CPU OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1"
+    ]
+}
+
 class DeltaHashBot:
     def __init__(self):
         self.base_url = "https://portal.deltahash.ai"
-        self.headers = {
+        self.cookie_file = "cookies.json"
+        self.headers_template = {
             "accept": "*/*",
             "accept-language": "en-US,en;q=0.9",
             "content-type": "application/json",
             "origin": "https://portal.deltahash.ai",
             "referer": "https://portal.deltahash.ai/mining",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
-            "sec-ch-ua": '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"Windows"',
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin"
         }
+        self.cookie_store = self.load_cookie_store()
 
     def get_wib_time(self):
         wib = pytz.timezone('Asia/Jakarta')
@@ -74,6 +96,36 @@ class DeltaHashBot:
             self.log(f"File {filename} not found!", "ERROR")
             return []
 
+    def load_cookie_store(self):
+        if not os.path.exists(self.cookie_file):
+            return {}
+        try:
+            with open(self.cookie_file, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+
+    def save_cookie_store(self):
+        try:
+            with open(self.cookie_file, 'w') as f:
+                json.dump(self.cookie_store, f, indent=4)
+        except:
+            pass
+
+    def get_user_agent(self, cookie, force_device=None):
+        if not force_device and cookie in self.cookie_store:
+            return self.cookie_store[cookie].get("user_agent")
+        
+        device_type = force_device if force_device else "computer"
+        new_ua = random.choice(UA_LIBRARY.get(device_type, UA_LIBRARY["computer"]))
+        
+        self.cookie_store[cookie] = {
+            "user_agent": new_ua,
+            "device": device_type
+        }
+        self.save_cookie_store()
+        return new_ua
+
     def show_menu(self):
         print(f"{Fore.CYAN}============================================================{Style.RESET_ALL}")
         print(f"{Fore.CYAN}Select Mode:{Style.RESET_ALL}")
@@ -102,8 +154,11 @@ class DeltaHashBot:
 
     def check_user(self, cookie, proxy):
         url = f"{self.base_url}/api/auth/me"
-        headers = self.headers.copy()
+        user_agent = self.get_user_agent(cookie)
+        
+        headers = self.headers_template.copy()
         headers["cookie"] = cookie
+        headers["user-agent"] = user_agent
         
         try:
             response = requests.get(url, headers=headers, proxies=proxy, timeout=30)
@@ -115,23 +170,53 @@ class DeltaHashBot:
         except:
             return None
 
-    def connect_mining(self, cookie, proxy):
+    def connect_mining(self, cookie, proxy, retry_count=0):
+        if retry_count > 1:
+            return None 
+
         url = f"{self.base_url}/api/mining/connect"
-        headers = self.headers.copy()
+        user_agent = self.get_user_agent(cookie)
+        
+        headers = self.headers_template.copy()
         headers["cookie"] = cookie
+        headers["user-agent"] = user_agent
         
         try:
             response = requests.post(url, json={}, headers=headers, proxies=proxy, timeout=30)
+            
             if response.status_code == 200:
                 return response.json()
+            
+            try:
+                error_msg = response.text.lower()
+                if "registered with" in error_msg:
+                    detected_device = "computer"
+                    if "android" in error_msg:
+                        detected_device = "android"
+                    elif "ios" in error_msg or "iphone" in error_msg or "ipad" in error_msg:
+                        detected_device = "ios"
+                    elif "mac" in error_msg:
+                        detected_device = "mac"
+                    elif "linux" in error_msg:
+                        detected_device = "computer"
+                    
+                    self.log(f"Device Mismatch! Switching to {detected_device}...", "WARNING")
+                    self.get_user_agent(cookie, force_device=detected_device)
+                    return self.connect_mining(cookie, proxy, retry_count + 1)
+            except:
+                pass
+                
             return None
         except:
             return None
 
     def send_heartbeat(self, cookie, proxy):
         url = f"{self.base_url}/api/mining/heartbeat"
-        headers = self.headers.copy()
+        user_agent = self.get_user_agent(cookie)
+        
+        headers = self.headers_template.copy()
         headers["cookie"] = cookie
+        headers["user-agent"] = user_agent
         
         try:
             response = requests.post(url, headers=headers, proxies=proxy, timeout=30)
