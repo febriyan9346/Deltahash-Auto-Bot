@@ -7,6 +7,7 @@ import random
 from datetime import datetime
 import pytz
 from colorama import Fore, Style, init
+from fake_useragent import UserAgent
 import warnings
 
 warnings.filterwarnings('ignore')
@@ -14,18 +15,10 @@ warnings.filterwarnings('ignore')
 init(autoreset=True)
 
 UA_LIBRARY = {
-    "computer": [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edg/122.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0"
-    ],
-    "mac": [
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15"
-    ],
     "android": [
         "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.64 Mobile Safari/537.36",
-        "Mozilla/5.0 (Linux; Android 13; SM-A536B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.6167.144 Mobile Safari/537.36"
+        "Mozilla/5.0 (Linux; Android 13; SM-A536B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.6167.144 Mobile Safari/537.36",
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36"
     ],
     "ios": [
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
@@ -37,6 +30,7 @@ class DeltaHashBot:
     def __init__(self):
         self.base_url = "https://portal.deltahash.ai"
         self.cookie_file = "cookies.json"
+        self.active_sessions = [] 
         self.headers_template = {
             "accept": "*/*",
             "accept-language": "en-US,en;q=0.9",
@@ -50,6 +44,10 @@ class DeltaHashBot:
             "sec-fetch-site": "same-origin"
         }
         self.cookie_store = self.load_cookie_store()
+        try:
+            self.ua_provider = UserAgent()
+        except:
+            self.ua_provider = None
 
     def get_wib_time(self):
         wib = pytz.timezone('Asia/Jakarta')
@@ -112,12 +110,23 @@ class DeltaHashBot:
         except:
             pass
 
+    def generate_ua(self, device_type):
+        if device_type == "computer":
+            if self.ua_provider:
+                try:
+                    return self.ua_provider.random
+                except:
+                    pass
+            return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        
+        return random.choice(UA_LIBRARY.get(device_type, UA_LIBRARY["android"]))
+
     def get_user_agent(self, cookie, force_device=None):
         if not force_device and cookie in self.cookie_store:
             return self.cookie_store[cookie].get("user_agent")
         
         device_type = force_device if force_device else "computer"
-        new_ua = random.choice(UA_LIBRARY.get(device_type, UA_LIBRARY["computer"]))
+        new_ua = self.generate_ua(device_type)
         
         self.cookie_store[cookie] = {
             "user_agent": new_ua,
@@ -151,6 +160,30 @@ class DeltaHashBot:
             print(f"\r[COUNTDOWN] Next cycle in: {hours:02d}:{minutes:02d}:{secs:02d} ", end="", flush=True)
             time.sleep(1)
         print("\r" + " " * 60 + "\r", end="", flush=True)
+
+    def get_global_status(self, proxy):
+        url = f"{self.base_url}/api/mining/status"
+        try:
+            response = requests.get(url, headers=self.headers_template, proxies=proxy, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                epoch = data.get("epoch", {}).get("number") or data.get("epochNumber")
+                if epoch:
+                    self.log(f"Global Mining Status | Current Epoch: {epoch}", "INFO")
+        except:
+            pass
+
+    def disconnect_account(self, cookie, proxy):
+        url = f"{self.base_url}/api/mining/disconnect"
+        user_agent = self.get_user_agent(cookie)
+        headers = self.headers_template.copy()
+        headers["cookie"] = cookie
+        headers["user-agent"] = user_agent
+        
+        try:
+            requests.post(url, json={}, headers=headers, proxies=proxy, timeout=10)
+        except:
+            pass
 
     def check_user(self, cookie, proxy):
         url = f"{self.base_url}/api/auth/me"
@@ -196,11 +229,11 @@ class DeltaHashBot:
                     elif "ios" in error_msg or "iphone" in error_msg or "ipad" in error_msg:
                         detected_device = "ios"
                     elif "mac" in error_msg:
-                        detected_device = "mac"
+                        detected_device = "computer"
                     elif "linux" in error_msg:
                         detected_device = "computer"
                     
-                    self.log(f"Device Mismatch! Switching to {detected_device}...", "WARNING")
+                    self.log(f"Device Mismatch detected! Switching to {detected_device}...", "WARNING")
                     self.get_user_agent(cookie, force_device=detected_device)
                     return self.connect_mining(cookie, proxy, retry_count + 1)
             except:
@@ -243,64 +276,81 @@ class DeltaHashBot:
         
         print(f"\n{Fore.CYAN}============================================================{Style.RESET_ALL}\n")
         
-        cycle = 1
-        while True:
-            self.log(f"Cycle #{cycle} Started", "CYCLE")
-            print(f"{Fore.CYAN}------------------------------------------------------------{Style.RESET_ALL}")
-            
-            for i, cookie in enumerate(accounts):
-                proxy_config = None
-                proxy_str = "No Proxy"
+        try:
+            cycle = 1
+            while True:
+                self.log(f"Cycle #{cycle} Started", "CYCLE")
                 
+                first_proxy = None
                 if use_proxy and proxies:
-                    proxy_url = proxies[i % len(proxies)]
-                    proxy_config = {"http": proxy_url, "https": proxy_url}
-                    proxy_str = proxy_url
-
-                self.log(f"Account #{i+1}/{len(accounts)}", "INFO")
-                if use_proxy:
-                    self.log(f"Proxy: {proxy_str}", "INFO")
-
-                user = self.check_user(cookie, proxy_config)
+                    p_url = proxies[0]
+                    first_proxy = {"http": p_url, "https": p_url}
                 
-                if user:
-                    username = user.get("username", "Unknown")
-                    balance = user.get("balance", 0)
-                    self.log(f"User: {username} | Balance: {balance}", "SUCCESS")
+                self.get_global_status(first_proxy)
+
+                print(f"{Fore.CYAN}------------------------------------------------------------{Style.RESET_ALL}")
+                
+                self.active_sessions = [] 
+                
+                for i, cookie in enumerate(accounts):
+                    proxy_config = None
+                    proxy_str = "No Proxy"
                     
-                    mining_data = self.connect_mining(cookie, proxy_config)
-                    if mining_data and mining_data.get("success"):
-                        epoch = mining_data.get("epochNumber", 0)
-                        self.log(f"Mining Connected | Epoch: {epoch}", "SUCCESS")
+                    if use_proxy and proxies:
+                        proxy_url = proxies[i % len(proxies)]
+                        proxy_config = {"http": proxy_url, "https": proxy_url}
+                        proxy_str = proxy_url
+
+                    self.log(f"Account #{i+1}/{len(accounts)}", "INFO")
+                    if use_proxy:
+                        self.log(f"Proxy: {proxy_str}", "INFO")
+
+                    user = self.check_user(cookie, proxy_config)
+                    
+                    if user:
+                        username = user.get("username", "Unknown")
+                        balance = user.get("balance", 0)
+                        self.log(f"User: {username} | Balance: {balance}", "SUCCESS")
                         
-                        time.sleep(1)
-                        
-                        heartbeat_data = self.send_heartbeat(cookie, proxy_config)
-                        if heartbeat_data and heartbeat_data.get("success"):
-                            earned = heartbeat_data.get("tokensEarned", 0)
-                            new_balance = heartbeat_data.get("newBalance", 0)
-                            self.log(f"Heartbeat Success | Earned: {earned} | New Balance: {new_balance}", "SUCCESS")
+                        mining_data = self.connect_mining(cookie, proxy_config)
+                        if mining_data and mining_data.get("success"):
+                            epoch = mining_data.get("epochNumber", 0)
+                            self.log(f"Mining Connected | Epoch: {epoch}", "SUCCESS")
+                            
+                            self.active_sessions.append({'cookie': cookie, 'proxy': proxy_config})
+                            
+                            time.sleep(1)
+                            
+                            heartbeat_data = self.send_heartbeat(cookie, proxy_config)
+                            if heartbeat_data and heartbeat_data.get("success"):
+                                earned = heartbeat_data.get("tokensEarned", 0)
+                                new_balance = heartbeat_data.get("newBalance", 0)
+                                self.log(f"Heartbeat Success | Earned: {earned} | New Balance: {new_balance}", "SUCCESS")
+                            else:
+                                self.log("Heartbeat Failed", "ERROR")
                         else:
-                            self.log("Heartbeat Failed", "ERROR")
+                            self.log("Mining Connection Failed", "ERROR")
                     else:
-                        self.log("Mining Connection Failed", "ERROR")
-                else:
-                    self.log("Login Failed / Invalid Cookie", "ERROR")
+                        self.log("Login Failed / Invalid Cookie", "ERROR")
+                    
+                    if i < len(accounts) - 1:
+                        print(f"{Fore.WHITE}............................................................{Style.RESET_ALL}")
+                        time.sleep(2)
                 
-                if i < len(accounts) - 1:
-                    print(f"{Fore.WHITE}............................................................{Style.RESET_ALL}")
-                    time.sleep(2)
-            
-            print(f"{Fore.CYAN}------------------------------------------------------------{Style.RESET_ALL}")
-            self.log(f"Cycle #{cycle} Complete", "CYCLE")
-            print(f"{Fore.CYAN}============================================================{Style.RESET_ALL}\n")
-            
-            cycle += 1
-            self.countdown(30)
+                print(f"{Fore.CYAN}------------------------------------------------------------{Style.RESET_ALL}")
+                self.log(f"Cycle #{cycle} Complete", "CYCLE")
+                print(f"{Fore.CYAN}============================================================{Style.RESET_ALL}\n")
+                
+                cycle += 1
+                self.countdown(30)
+
+        except KeyboardInterrupt:
+            print(f"\n\n{Fore.YELLOW}[WARNING] Shutdown detected. Disconnecting active sessions...{Style.RESET_ALL}")
+            for session in self.active_sessions:
+                self.disconnect_account(session['cookie'], session['proxy'])
+            print(f"{Fore.GREEN}[SUCCESS] All accounts disconnected gracefully.{Style.RESET_ALL}")
+            sys.exit()
 
 if __name__ == "__main__":
-    try:
-        bot = DeltaHashBot()
-        bot.run()
-    except KeyboardInterrupt:
-        sys.exit()
+    bot = DeltaHashBot()
+    bot.run()
