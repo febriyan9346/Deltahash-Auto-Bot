@@ -30,7 +30,6 @@ class DeltaHashBot:
     def __init__(self):
         self.base_url = "https://portal.deltahash.ai"
         self.cookie_file = "cookies.json"
-        self.active_sessions = [] 
         self.headers_template = {
             "accept": "*/*",
             "accept-language": "en-US,en;q=0.9",
@@ -48,6 +47,7 @@ class DeltaHashBot:
             self.ua_provider = UserAgent()
         except:
             self.ua_provider = None
+        self.active_miners = []
 
     def get_wib_time(self):
         wib = pytz.timezone('Asia/Jakarta')
@@ -274,80 +274,96 @@ class DeltaHashBot:
 
         self.log(f"Loaded {len(accounts)} accounts", "INFO")
         
-        print(f"\n{Fore.CYAN}============================================================{Style.RESET_ALL}\n")
+        first_proxy = None
+        if use_proxy and proxies:
+            p_url = proxies[0]
+            first_proxy = {"http": p_url, "https": p_url}
         
+        self.get_global_status(first_proxy)
+        
+        print(f"\n{Fore.CYAN}============================================================{Style.RESET_ALL}\n")
+        self.log("Initializing Accounts (Login & Connect)...", "INFO")
+        print(f"{Fore.CYAN}------------------------------------------------------------{Style.RESET_ALL}")
+        
+        for i, cookie in enumerate(accounts):
+            proxy_config = None
+            proxy_str = "No Proxy"
+            if use_proxy and proxies:
+                proxy_url = proxies[i % len(proxies)]
+                proxy_config = {"http": proxy_url, "https": proxy_url}
+                proxy_str = proxy_url
+
+            self.log(f"Account #{i+1}/{len(accounts)} | Proxy: {proxy_str}", "INFO")
+
+            user = self.check_user(cookie, proxy_config)
+            if user:
+                username = user.get("username", "Unknown")
+                balance = user.get("balance", 0)
+                self.log(f"User: {username} | Balance: {balance}", "SUCCESS")
+                
+                mining_data = self.connect_mining(cookie, proxy_config)
+                if mining_data and mining_data.get("success"):
+                    epoch = mining_data.get("epochNumber", 0)
+                    self.log(f"Mining Connected | Epoch: {epoch}", "SUCCESS")
+                    self.active_miners.append({
+                        'index': i+1,
+                        'cookie': cookie,
+                        'proxy': proxy_config,
+                        'username': username
+                    })
+                else:
+                    self.log("Mining Connection Failed", "ERROR")
+            else:
+                self.log("Login Failed / Invalid Cookie", "ERROR")
+            
+            if i < len(accounts) - 1:
+                print(f"{Fore.WHITE}............................................................{Style.RESET_ALL}")
+                time.sleep(1)
+
+        print(f"{Fore.CYAN}============================================================{Style.RESET_ALL}")
+        self.log(f"Initialization Complete. Active Miners: {len(self.active_miners)}", "SUCCESS")
+        print(f"{Fore.CYAN}Starting Heartbeat Loop (Press Ctrl+C to Stop){Style.RESET_ALL}\n")
+
         try:
             cycle = 1
             while True:
-                self.log(f"Cycle #{cycle} Started", "CYCLE")
-                
-                first_proxy = None
-                if use_proxy and proxies:
-                    p_url = proxies[0]
-                    first_proxy = {"http": p_url, "https": p_url}
-                
-                self.get_global_status(first_proxy)
+                if not self.active_miners:
+                    self.log("No active miners. Exiting...", "ERROR")
+                    break
 
+                self.log(f"Heartbeat Cycle #{cycle} Started", "CYCLE")
                 print(f"{Fore.CYAN}------------------------------------------------------------{Style.RESET_ALL}")
                 
-                self.active_sessions = [] 
-                
-                for i, cookie in enumerate(accounts):
-                    proxy_config = None
-                    proxy_str = "No Proxy"
+                for miner in self.active_miners:
+                    cookie = miner['cookie']
+                    proxy = miner['proxy']
+                    idx = miner['index']
+                    username = miner['username']
                     
-                    if use_proxy and proxies:
-                        proxy_url = proxies[i % len(proxies)]
-                        proxy_config = {"http": proxy_url, "https": proxy_url}
-                        proxy_str = proxy_url
-
-                    self.log(f"Account #{i+1}/{len(accounts)}", "INFO")
-                    if use_proxy:
-                        self.log(f"Proxy: {proxy_str}", "INFO")
-
-                    user = self.check_user(cookie, proxy_config)
-                    
-                    if user:
-                        username = user.get("username", "Unknown")
-                        balance = user.get("balance", 0)
-                        self.log(f"User: {username} | Balance: {balance}", "SUCCESS")
-                        
-                        mining_data = self.connect_mining(cookie, proxy_config)
-                        if mining_data and mining_data.get("success"):
-                            epoch = mining_data.get("epochNumber", 0)
-                            self.log(f"Mining Connected | Epoch: {epoch}", "SUCCESS")
-                            
-                            self.active_sessions.append({'cookie': cookie, 'proxy': proxy_config})
-                            
-                            time.sleep(1)
-                            
-                            heartbeat_data = self.send_heartbeat(cookie, proxy_config)
-                            if heartbeat_data and heartbeat_data.get("success"):
-                                earned = heartbeat_data.get("tokensEarned", 0)
-                                new_balance = heartbeat_data.get("newBalance", 0)
-                                self.log(f"Heartbeat Success | Earned: {earned} | New Balance: {new_balance}", "SUCCESS")
-                            else:
-                                self.log("Heartbeat Failed", "ERROR")
-                        else:
-                            self.log("Mining Connection Failed", "ERROR")
+                    hb_data = self.send_heartbeat(cookie, proxy)
+                    if hb_data and hb_data.get("success"):
+                        earned = hb_data.get("tokensEarned", 0)
+                        new_balance = hb_data.get("newBalance", 0)
+                        self.log(f"Acct #{idx} ({username}) | +{earned} | Bal: {new_balance}", "SUCCESS")
                     else:
-                        self.log("Login Failed / Invalid Cookie", "ERROR")
-                    
-                    if i < len(accounts) - 1:
-                        print(f"{Fore.WHITE}............................................................{Style.RESET_ALL}")
-                        time.sleep(2)
-                
+                        self.log(f"Acct #{idx} ({username}) | Heartbeat Failed - Reconnecting...", "WARNING")
+                        
+                        connect_retry = self.connect_mining(cookie, proxy)
+                        if connect_retry and connect_retry.get("success"):
+                            self.log(f"Acct #{idx} Reconnected Successfully", "SUCCESS")
+                        else:
+                            self.log(f"Acct #{idx} Reconnection Failed", "ERROR")
+
                 print(f"{Fore.CYAN}------------------------------------------------------------{Style.RESET_ALL}")
                 self.log(f"Cycle #{cycle} Complete", "CYCLE")
-                print(f"{Fore.CYAN}============================================================{Style.RESET_ALL}\n")
                 
                 cycle += 1
                 self.countdown(30)
 
         except KeyboardInterrupt:
             print(f"\n\n{Fore.YELLOW}[WARNING] Shutdown detected. Disconnecting active sessions...{Style.RESET_ALL}")
-            for session in self.active_sessions:
-                self.disconnect_account(session['cookie'], session['proxy'])
+            for miner in self.active_miners:
+                self.disconnect_account(miner['cookie'], miner['proxy'])
             print(f"{Fore.GREEN}[SUCCESS] All accounts disconnected gracefully.{Style.RESET_ALL}")
             sys.exit()
 
