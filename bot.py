@@ -301,18 +301,21 @@ class DeltaHashBot:
                 balance = user.get("balance", 0)
                 self.log(f"User: {username} | Balance: {balance}", "SUCCESS")
                 
-                mining_data = self.connect_mining(cookie, proxy_config)
-                if mining_data and mining_data.get("success"):
-                    epoch = mining_data.get("epochNumber", 0)
-                    self.log(f"Mining Connected | Epoch: {epoch}", "SUCCESS")
-                    self.active_miners.append({
-                        'index': i+1,
-                        'cookie': cookie,
-                        'proxy': proxy_config,
-                        'username': username
-                    })
-                else:
-                    self.log("Mining Connection Failed", "ERROR")
+                while True:
+                    mining_data = self.connect_mining(cookie, proxy_config)
+                    if mining_data and mining_data.get("success"):
+                        epoch = mining_data.get("epochNumber", 0)
+                        self.log(f"Mining Connected | Epoch: {epoch}", "SUCCESS")
+                        self.active_miners.append({
+                            'index': i+1,
+                            'cookie': cookie,
+                            'proxy': proxy_config,
+                            'username': username
+                        })
+                        break
+                    else:
+                        self.log("Mining Connection Failed - Retrying...", "ERROR")
+                        time.sleep(2)
             else:
                 self.log("Login Failed / Invalid Cookie", "ERROR")
             
@@ -351,6 +354,16 @@ class DeltaHashBot:
                         connect_retry = self.connect_mining(cookie, proxy)
                         if connect_retry and connect_retry.get("success"):
                             self.log(f"Acct #{idx} Reconnected Successfully", "SUCCESS")
+                            
+                            time.sleep(2)
+                            retry_hb = self.send_heartbeat(cookie, proxy)
+                            if retry_hb and retry_hb.get("success"):
+                                earned = retry_hb.get("tokensEarned", 0)
+                                new_balance = retry_hb.get("newBalance", 0)
+                                self.log(f"Acct #{idx} ({username}) | +{earned} | Bal: {new_balance} (After Reconnect)", "SUCCESS")
+                            else:
+                                self.log(f"Acct #{idx} ({username}) | Heartbeat Retry Failed", "ERROR")
+                            
                         else:
                             self.log(f"Acct #{idx} Reconnection Failed", "ERROR")
 
